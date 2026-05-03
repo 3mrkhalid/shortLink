@@ -12,6 +12,7 @@ func main() {
 
 	config.LoadEnv()
 	config.DBConn()
+	config.CreateUserIndexes()
 
 	router := gin.Default()
 	router.Use(middlewares.CorsMiddleware())

@@ -3,12 +3,14 @@ package handlers
 import (
 	"context"
 	"net/http"
+	"net/mail"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.mongodb.org/mongo-driver/bson"
-	"golang.org/x/crypto/bcrypt"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"golang.org/x/crypto/bcrypt"
 
 	"shortlink/config"
 	"shortlink/models"
@@ -31,7 +33,7 @@ func LoginHandler(c *gin.Context) {
 	var req Login
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "all fields are required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid input"})
 		return
 	}
 
@@ -42,33 +44,35 @@ func LoginHandler(c *gin.Context) {
 
 	var user models.User
 
-	err := collection.FindOne(ctx, bson.M{
-		"$or": []bson.M{
-			{"username": req.Identifier},
-			{"email": req.Identifier},
-		},
-	}).Decode(&user)
+	// detect email or username
+	filter := bson.M{}
 
+	if _, err := mail.ParseAddress(req.Identifier); err == nil {
+		filter = bson.M{"email":req.Identifier}
+	}else {
+		filter = bson.M{"username":req.Identifier}
+	}
+
+	err := collection.FindOne(ctx, filter).Decode(&user)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
 
-	
+	// check password
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-
 
 	token, err := utils.GenerateToken(user.ID.Hex())
 	if err != nil {
-		c.JSON(500, gin.H{"error": "failed to generate token"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
 		return
 	}
 
-	c.JSON(200, gin.H{
+	c.JSON(http.StatusOK, gin.H{
 		"message": "login successful",
 		"token":   token,
 	})
@@ -79,7 +83,7 @@ func RegisterHandler(c *gin.Context) {
 	var req Register
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "all fields are required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid input"})
 		return
 	}
 
@@ -88,23 +92,30 @@ func RegisterHandler(c *gin.Context) {
 
 	collection := config.DB.Collection("users")
 
+	var user models.User
+
 	// check if user exists
 	err := collection.FindOne(ctx, bson.M{
 		"$or": []bson.M{
 			{"username": req.Username},
 			{"email": req.Email},
 		},
-	}).Err()
+	}).Decode(&user)
 
 	if err == nil {
-		c.JSON(400, gin.H{"error": "username or email already exists"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username or email already exists"})
+		return
+	}
+
+	if err != mongo.ErrNoDocuments {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
 
 	// hash password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "failed to hash password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
 		return
 	}
 
@@ -116,20 +127,23 @@ func RegisterHandler(c *gin.Context) {
 
 	res, err := collection.InsertOne(ctx, newUser)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "failed to create user"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
 		return
 	}
-	// convert id from object to string
-	id := res.InsertedID.(primitive.ObjectID).Hex()
 
+	oid, ok := res.InsertedID.(primitive.ObjectID)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid user id"})
+		return
+	}
 
-	token, err := utils.GenerateToken(id)
+	token, err := utils.GenerateToken(oid.Hex())
 	if err != nil {
-		c.JSON(500, gin.H{"error": "failed to generate token"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
 		return
 	}
 
-	c.JSON(200, gin.H{
+	c.JSON(http.StatusOK, gin.H{
 		"message": "registered successfully",
 		"token":   token,
 	})
