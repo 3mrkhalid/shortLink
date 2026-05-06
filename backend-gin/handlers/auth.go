@@ -28,6 +28,10 @@ type Login struct {
 	Password   string `json:"password" binding:"required"`
 }
 
+type forgetPassword struct {
+	Email string `json:"email" binding:"required,email"`
+}
+
 func LoginHandler(c *gin.Context) {
 
 	var req Login
@@ -147,4 +151,59 @@ func RegisterHandler(c *gin.Context) {
 		"message": "registered successfully",
 		"token":   token,
 	})
+}
+
+func ForgetPasswordHandler(c *gin.Context) {
+
+	var req forgetPassword
+
+	if err :=c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid input"})
+		return
+	}
+
+	var user models.User
+	
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	collection := config.DB.Collection("users")
+
+	err := collection.FindOne(ctx, bson.M{
+		"email" : req.Email,
+	}).Decode(&user)
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email not found"})
+		return
+	}
+
+	// generate reset token
+	resetToken, err := utils.GenerateResetToken()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate reset token"})
+		return
+	}
+
+	//send reset email
+	err = utils.SendResetEmail(user.Email, resetToken)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to send reset email"})
+		return
+	}
+
+	//Hash reset token
+	hashedResetToken, err := bcrypt.GenerateFromPassword([]byte(resetToken), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash reset token"})
+		return
+	}
+
+	// save reset token to user
+	_, err = collection.UpdateOne(ctx, bson.M{"_id": user.ID}, bson.M{
+		"$set": bson.M{
+			"reset_token": string(hashedResetToken),
+			"reset_token_expires": time.Now().Add(10 * time.Second),
+		},
+	})	
 }
